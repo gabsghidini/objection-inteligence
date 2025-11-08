@@ -1,11 +1,12 @@
 import React, { useState, useCallback, useRef } from 'react';
 import { GoogleGenAI, Modality } from '@google/genai';
 import type { LiveSession } from '@google/genai';
+import { encode } from './utils/audioUtils';
 
 import { Header } from './components/Header';
 import { Recorder } from './components/Recorder';
 import { AnalysisDisplay } from './components/AnalysisDisplay';
-import type { AppState, TranscriptionEntry, AppMode } from './types';
+import type { AppState, TranscriptionEntry, AppMode, AudioSource } from './types';
 import { ANALYSIS_PROMPT } from './constants';
 
 const fileToBase64 = (file: File): Promise<string> => {
@@ -48,61 +49,160 @@ const App: React.FC = () => {
   const [analysis, setAnalysis] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<AppMode>('train');
+  const [audioSource, setAudioSource] = useState<AudioSource | null>(null);
+
 
   const sessionPromiseRef = useRef<Promise<LiveSession> | null>(null);
   const turnCompleteRef = useRef(true);
+  const audioStreamRef = useRef<{ 
+      micStream?: MediaStream, 
+      displayStream?: MediaStream, 
+      processor?: ScriptProcessorNode, 
+      source?: MediaStreamAudioSourceNode | ScriptProcessorNode,
+      audioContext?: AudioContext,
+    } | null>(null);
 
-  const startRecording = async () => {
+
+  const setupAndStartSession = (stream: MediaStream) => {
+    try {
+        const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+        const source = audioContext.createMediaStreamSource(stream);
+        const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+        processor.onaudioprocess = (audioProcessingEvent) => {
+            const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
+            const l = inputData.length;
+            const int16 = new Int16Array(l);
+            for (let i = 0; i < l; i++) {
+                int16[i] = inputData[i] * 32768;
+            }
+            const pcmBlob = {
+                data: encode(new Uint8Array(int16.buffer)),
+                mimeType: 'audio/pcm;rate=16000',
+            };
+            sessionPromiseRef.current?.then((session) => {
+                session.sendRealtimeInput({ media: pcmBlob });
+            });
+        };
+
+        source.connect(processor);
+        processor.connect(audioContext.destination); // This is necessary for the processor to start
+        audioStreamRef.current = { ...audioStreamRef.current, audioContext, source, processor };
+
+    } catch (err) {
+        console.error('Error setting up audio session:', err);
+        setError(getErrorMessage(err));
+        setAppState('error');
+    }
+  }
+
+
+  const startRecording = async (source: AudioSource) => {
     try {
       setAppState('initializing');
       setError(null);
       setTranscription([]);
       setAnalysis('');
+      setAudioSource(source);
       turnCompleteRef.current = true;
 
+      let combinedStream: MediaStream;
+      
+      const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioStreamRef.current = { micStream };
+      
+      if (source === 'systemAndMicrophone') {
+        const displayStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+        audioStreamRef.current.displayStream = displayStream;
+
+        const audioContext = new AudioContext({ sampleRate: 16000 });
+        const micSource = audioContext.createMediaStreamSource(micStream);
+        const dest = audioContext.createMediaStreamDestination();
+
+        micSource.connect(dest);
+
+        // Check if the display stream has an audio track
+        if (displayStream.getAudioTracks().length > 0) {
+            const displaySource = audioContext.createMediaStreamSource(displayStream);
+            displaySource.connect(dest);
+        } else {
+            console.warn("Selected display source has no audio track.");
+        }
+        combinedStream = dest.stream;
+
+      } else {
+        combinedStream = micStream;
+      }
+
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
-      sessionPromiseRef.current = ai.live.connect({
+
+      const isLiveAnalysis = source === 'systemAndMicrophone';
+      const connectConfig = {
         model: 'gemini-2.5-flash-native-audio-preview-09-2025',
         config: {
-          responseModalities: [Modality.AUDIO],
-          inputAudioTranscription: {},
-          outputAudioTranscription: {},
-          systemInstruction:
-            'You are a potential customer in a sales call. Be inquisitive, raise some concerns, but be open to the solution presented. Keep your responses concise.',
+            responseModalities: [Modality.AUDIO],
+            inputAudioTranscription: {},
+            ...(isLiveAnalysis
+                ? {
+                    systemInstruction: 'You are a silent transcription service. Do not generate any spoken response.',
+                  }
+                : {
+                    outputAudioTranscription: {},
+                    systemInstruction: 'You are a potential customer in a sales call. Be inquisitive, raise some concerns, but be open to the solution presented. Keep your responses concise.',
+                  }),
         },
         callbacks: {
-          onopen: () => setAppState('recording'),
+          onopen: () => {
+            setupAndStartSession(combinedStream);
+            setAppState('recording');
+          },
           onmessage: (message) => {
-            if (message.serverContent?.inputTranscription) {
-              const text = message.serverContent.inputTranscription.text;
-              setTranscription(prev => {
-                const lastEntry = prev[prev.length - 1];
-                if (turnCompleteRef.current || !lastEntry || lastEntry.speaker !== 'Vendedor') {
-                  turnCompleteRef.current = false;
-                  return [...prev, { speaker: 'Vendedor' as const, text }];
-                } else {
-                  const newTranscription = [...prev];
-                  newTranscription[newTranscription.length - 1] = { ...lastEntry, text: lastEntry.text + text };
-                  return newTranscription;
+            if (isLiveAnalysis) {
+                if (message.serverContent?.inputTranscription) {
+                    const text = message.serverContent.inputTranscription.text;
+                    setTranscription(prev => {
+                      const lastEntry = prev[prev.length - 1];
+                      if (!lastEntry || lastEntry.speaker !== 'Raw') {
+                        return [...prev, { speaker: 'Raw' as const, text }];
+                      } else {
+                        const newTranscription = [...prev];
+                        newTranscription[newTranscription.length - 1] = { ...lastEntry, text: lastEntry.text + text };
+                        return newTranscription;
+                      }
+                    });
                 }
-              });
-            }
-
-            if (message.serverContent?.outputTranscription) {
-              const text = message.serverContent.outputTranscription.text;
-              setTranscription(prev => {
-                const lastEntry = prev[prev.length - 1];
-                if (turnCompleteRef.current || !lastEntry || lastEntry.speaker !== 'Cliente') {
-                  turnCompleteRef.current = false;
-                  return [...prev, { speaker: 'Cliente' as const, text }];
-                } else {
-                  const newTranscription = [...prev];
-                  newTranscription[newTranscription.length - 1] = { ...lastEntry, text: lastEntry.text + text };
-                  return newTranscription;
+            } else {
+                // Practice mode with distinct speakers
+                if (message.serverContent?.inputTranscription) {
+                  const text = message.serverContent.inputTranscription.text;
+                  setTranscription(prev => {
+                    const lastEntry = prev[prev.length - 1];
+                    if (turnCompleteRef.current || !lastEntry || lastEntry.speaker !== 'Vendedor') {
+                      turnCompleteRef.current = false;
+                      return [...prev, { speaker: 'Vendedor' as const, text }];
+                    } else {
+                      const newTranscription = [...prev];
+                      newTranscription[newTranscription.length - 1] = { ...lastEntry, text: lastEntry.text + text };
+                      return newTranscription;
+                    }
+                  });
                 }
-              });
-            }
 
+                if (message.serverContent?.outputTranscription) {
+                  const text = message.serverContent.outputTranscription.text;
+                  setTranscription(prev => {
+                    const lastEntry = prev[prev.length - 1];
+                    if (turnCompleteRef.current || !lastEntry || lastEntry.speaker !== 'Cliente') {
+                      turnCompleteRef.current = false;
+                      return [...prev, { speaker: 'Cliente' as const, text }];
+                    } else {
+                      const newTranscription = [...prev];
+                      newTranscription[newTranscription.length - 1] = { ...lastEntry, text: lastEntry.text + text };
+                      return newTranscription;
+                    }
+                  });
+                }
+            }
             if (message.serverContent?.turnComplete) {
               turnCompleteRef.current = true;
             }
@@ -116,7 +216,9 @@ const App: React.FC = () => {
             setAppState('error');
           },
         },
-      });
+      };
+
+      sessionPromiseRef.current = ai.live.connect(connectConfig);
     } catch (err) {
       console.error(err);
       setError(getErrorMessage(err));
@@ -125,9 +227,20 @@ const App: React.FC = () => {
   };
 
   const stopRecording = useCallback(async () => {
+    setAppState('finalizing');
+
+    // Stop all media tracks
+    if (audioStreamRef.current) {
+        audioStreamRef.current.micStream?.getTracks().forEach(track => track.stop());
+        audioStreamRef.current.displayStream?.getTracks().forEach(track => track.stop());
+        audioStreamRef.current.processor?.disconnect();
+        audioStreamRef.current.source?.disconnect();
+        audioStreamRef.current.audioContext?.close();
+        audioStreamRef.current = null;
+    }
+
     if (sessionPromiseRef.current) {
       try {
-        setAppState('finalizing');
         const session = await sessionPromiseRef.current;
         session.close();
         sessionPromiseRef.current = null;
@@ -148,12 +261,23 @@ const App: React.FC = () => {
 
     setAppState('analyzing');
     try {
-      const formattedTranscription = transcription
-        .filter(t => t.text)
-        .map(({ speaker, text }) => `${speaker}: ${text}`)
-        .join('\n');
+      let promptWithTranscription = '';
       
-      const promptWithTranscription = `${ANALYSIS_PROMPT}\n\nAqui está a transcrição da call para analisar:\n\n${formattedTranscription}`;
+      if (audioSource === 'systemAndMicrophone') {
+        const rawTranscription = transcription.map(t => t.text).join('');
+        const diarizationInstruction = `
+          Primeiro, analise a transcrição bruta a seguir e identifique os dois locutores. O 'Vendedor' é a pessoa que conduz a chamada de vendas (capturada pelo microfone). O 'Cliente' é o prospect (capturado pelo áudio do sistema). Reformate a transcrição, rotulando claramente cada fala como 'Vendedor:' ou 'Cliente:'.
+          Depois de reformatar a transcrição com os locutores corretos, execute a análise de vendas completa usando o modelo fornecido.
+        `;
+        promptWithTranscription = `${ANALYSIS_PROMPT}\n\n${diarizationInstruction}\n\nAqui está a transcrição bruta da call para analisar:\n\n${rawTranscription}`;
+      } else {
+        const formattedTranscription = transcription
+          .filter(t => t.text)
+          .map(({ speaker, text }) => `${speaker}: ${text}`)
+          .join('\n');
+        promptWithTranscription = `${ANALYSIS_PROMPT}\n\nAqui está a transcrição da call para analisar:\n\n${formattedTranscription}`;
+      }
+
 
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
       const response = await ai.models.generateContent({
@@ -168,7 +292,7 @@ const App: React.FC = () => {
       setError(getErrorMessage(err));
       setAppState('error');
     }
-  }, [transcription]);
+  }, [transcription, audioSource]);
 
   const handleFileUpload = async (file: File) => {
     setAppState('uploading');
@@ -214,9 +338,15 @@ const App: React.FC = () => {
     setError(null);
     setTranscription([]);
     setAnalysis('');
+    setAudioSource(null);
     if (sessionPromiseRef.current) {
         sessionPromiseRef.current.then(session => session.close()).catch(console.error);
         sessionPromiseRef.current = null;
+    }
+    if (audioStreamRef.current) {
+        audioStreamRef.current.micStream?.getTracks().forEach(track => track.stop());
+        audioStreamRef.current.displayStream?.getTracks().forEach(track => track.stop());
+        audioStreamRef.current = null;
     }
   }
 
@@ -233,7 +363,6 @@ const App: React.FC = () => {
             onStop={stopRecording}
             onReset={resetApp}
             onAnalyze={handleAnalysis}
-            sessionPromise={sessionPromiseRef.current}
             mode={mode}
             onFileUpload={handleFileUpload}
           />

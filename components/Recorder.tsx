@@ -1,19 +1,16 @@
 import React, { useEffect, useRef, useState } from 'react';
-import type { LiveSession } from '@google/genai';
-import { AppState, TranscriptionEntry, AppMode } from '../types';
-import { MicrophoneIcon, StopIcon, ActivityIcon, RefreshCwIcon, SendIcon, UploadCloudIcon, DownloadIcon } from './Icons';
-import { encode } from '../utils/audioUtils';
+import { AppState, TranscriptionEntry, AppMode, AudioSource } from '../types';
+import { MicrophoneIcon, StopIcon, ActivityIcon, RefreshCwIcon, SendIcon, UploadCloudIcon, DownloadIcon, MonitorSpeakerIcon } from './Icons';
 
 interface RecorderProps {
   appState: AppState;
   transcription: TranscriptionEntry[];
   error: string | null;
-  onStart: () => void;
+  onStart: (source: AudioSource) => void;
   onStop: () => void;
   onReset: () => void;
   onAnalyze: () => void;
   onFileUpload: (file: File) => void;
-  sessionPromise: Promise<LiveSession> | null;
   mode: AppMode;
 }
 
@@ -26,11 +23,9 @@ export const Recorder: React.FC<RecorderProps> = ({
   onReset,
   onAnalyze,
   onFileUpload,
-  sessionPromise,
   mode
 }) => {
   const transcriptionEndRef = useRef<HTMLDivElement>(null);
-  const audioStreamRef = useRef<{ stream: MediaStream, source: MediaStreamAudioSourceNode, processor: ScriptProcessorNode } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
 
@@ -51,7 +46,7 @@ export const Recorder: React.FC<RecorderProps> = ({
     if (transcription.length === 0) return;
 
     const formattedTranscription = transcription
-        .map(({ speaker, text }) => `${speaker}: ${text}`)
+        .map(({ speaker, text }) => `${speaker === 'Raw' ? 'Transcription' : speaker}: ${text}`)
         .join('\n\n');
 
     const blob = new Blob([formattedTranscription], { type: 'text/plain;charset=utf-8' });
@@ -65,52 +60,6 @@ export const Recorder: React.FC<RecorderProps> = ({
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
   };
-
-
-  useEffect(() => {
-    if (mode === 'train' && appState === 'recording' && sessionPromise) {
-      const startMicrophone = async () => {
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-          const source = audioContext.createMediaStreamSource(stream);
-          const processor = audioContext.createScriptProcessor(4096, 1, 1);
-
-          processor.onaudioprocess = (audioProcessingEvent) => {
-            const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
-            const l = inputData.length;
-            const int16 = new Int16Array(l);
-            for (let i = 0; i < l; i++) {
-                int16[i] = inputData[i] * 32768;
-            }
-            const pcmBlob = {
-                data: encode(new Uint8Array(int16.buffer)),
-                mimeType: 'audio/pcm;rate=16000',
-            };
-            sessionPromise.then((session) => {
-                session.sendRealtimeInput({ media: pcmBlob });
-            });
-          };
-
-          source.connect(processor);
-          processor.connect(audioContext.destination);
-          audioStreamRef.current = { stream, source, processor };
-        } catch (err) {
-            console.error('Microphone access denied:', err);
-        }
-      };
-      startMicrophone();
-    }
-
-    return () => {
-      if (audioStreamRef.current) {
-        audioStreamRef.current.processor.disconnect();
-        audioStreamRef.current.source.disconnect();
-        audioStreamRef.current.stream.getTracks().forEach(track => track.stop());
-        audioStreamRef.current = null;
-      }
-    };
-  }, [appState, sessionPromise, mode]);
 
   useEffect(() => {
     transcriptionEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -161,14 +110,26 @@ export const Recorder: React.FC<RecorderProps> = ({
     }
 
     // Train mode
-    if (appState === 'idle' || appState === 'complete' || appState === 'error') {
-      const action = (appState === 'idle') ? onStart : onReset;
-      const text = (appState === 'idle') ? 'Start Recording' : 'Start New Analysis';
-      const icon = (appState === 'idle') ? <MicrophoneIcon className="h-5 w-5 mr-2" /> : <RefreshCwIcon className="h-5 w-5 mr-2" />;
+    if (appState === 'idle') {
+       return (
+        <div className="flex flex-col space-y-3">
+          <button onClick={() => onStart('microphone')} className="w-full flex items-center justify-center px-6 py-3 border border-transparent text-base font-medium rounded-md text-white bg-cyan-600 hover:bg-cyan-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-cyan-500 focus:ring-offset-gray-900 transition-colors duration-200">
+             <MicrophoneIcon className="h-5 w-5 mr-2" />
+             Start Mic Practice
+           </button>
+           <button onClick={() => onStart('systemAndMicrophone')} className="w-full flex items-center justify-center px-6 py-3 border border-transparent text-base font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 focus:ring-offset-gray-900 transition-colors duration-200">
+             <MonitorSpeakerIcon className="h-5 w-5 mr-2" />
+             Analyze Live Call
+           </button>
+        </div>
+       );
+    }
+    
+    if (appState === 'complete' || appState === 'error') {
       return (
-        <button onClick={action} className="w-full flex items-center justify-center px-6 py-3 border border-transparent text-base font-medium rounded-md text-white bg-cyan-600 hover:bg-cyan-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-cyan-500 focus:ring-offset-gray-900 transition-colors duration-200">
-          {icon}
-          {text}
+        <button onClick={onReset} className="w-full flex items-center justify-center px-6 py-3 border border-transparent text-base font-medium rounded-md text-white bg-cyan-600 hover:bg-cyan-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-cyan-500 focus:ring-offset-gray-900 transition-colors duration-200">
+          <RefreshCwIcon className="h-5 w-5 mr-2" />
+          Start New Analysis
         </button>
       );
     }
@@ -227,14 +188,25 @@ export const Recorder: React.FC<RecorderProps> = ({
     }
     return (
         <div className="space-y-4">
-          {transcription.map((entry, index) => (
-            <div key={index} className={`flex flex-col ${entry.speaker === 'Vendedor' ? 'items-start' : 'items-end'}`}>
-              <div className={`rounded-lg px-3 py-2 max-w-sm ${entry.speaker === 'Vendedor' ? 'bg-blue-900/50 text-blue-200' : 'bg-gray-700 text-gray-300'}`}>
-                <p className="font-bold text-xs mb-1">{entry.speaker}</p>
-                <p className="text-sm">{entry.text}</p>
+          {transcription.map((entry, index) => {
+             if (entry.speaker === 'Raw') {
+              return (
+                <div key={index} className="w-full">
+                  <div className="rounded-lg px-3 py-2 bg-gray-700/50 text-gray-300">
+                    <p className="text-sm whitespace-pre-wrap">{entry.text}</p>
+                  </div>
+                </div>
+              );
+            }
+            return (
+              <div key={index} className={`flex flex-col ${entry.speaker === 'Vendedor' ? 'items-start' : 'items-end'}`}>
+                <div className={`rounded-lg px-3 py-2 max-w-sm ${entry.speaker === 'Vendedor' ? 'bg-blue-900/50 text-blue-200' : 'bg-gray-700 text-gray-300'}`}>
+                  <p className="font-bold text-xs mb-1">{entry.speaker}</p>
+                  <p className="text-sm">{entry.text}</p>
+                </div>
               </div>
-            </div>
-          ))}
+            )
+          })}
           <div ref={transcriptionEndRef} />
         </div>
     )

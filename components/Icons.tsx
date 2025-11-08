@@ -103,3 +103,12 @@ export const DownloadIcon: React.FC<React.SVGProps<SVGSVGElement>> = (props) => 
         <line x1="12" x2="12" y1="15" y2="3" />
     </Icon>
 );
+
+export const MonitorSpeakerIcon: React.FC<React.SVGProps<SVGSVGElement>> = (props) => (
+    <Icon {...props}>
+        <path d="M5.5 20H8" />
+        <path d="M17 9h.01" />
+        <path d="M8 20V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v16" />
+        <path d="m12 16 3 4H9l3-4Z" />
+    </Icon>
+);

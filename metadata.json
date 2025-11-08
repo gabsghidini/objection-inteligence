@@ -2,6 +2,7 @@
   "name": "Gemini Sales Call Intelligence",
   "description": "An advanced sales intelligence assistant that listens to sales calls, transcribes them, and provides in-depth analysis on objections, emotional sentiment, and sales performance.",
   "requestFramePermissions": [
-    "microphone"
+    "microphone",
+    "display-capture"
   ]
 }
