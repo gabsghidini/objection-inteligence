@@ -1,4 +1,3 @@
-
 import React from 'react';
 
 export const Icon: React.FC<React.SVGProps<SVGSVGElement>> = (props) => (
@@ -82,3 +81,25 @@ export const RefreshCwIcon: React.FC<React.SVGProps<SVGSVGElement>> = (props) =>
     </Icon>
 );
 
+export const SendIcon: React.FC<React.SVGProps<SVGSVGElement>> = (props) => (
+    <Icon {...props}>
+      <path d="m22 2-7 20-4-9-9-4Z" />
+      <path d="m22 2-11 11" />
+    </Icon>
+);
+
+export const UploadCloudIcon: React.FC<React.SVGProps<SVGSVGElement>> = (props) => (
+    <Icon {...props}>
+        <path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242" />
+        <path d="M12 12v9" />
+        <path d="m16 16-4-4-4 4" />
+    </Icon>
+);
+
+export const DownloadIcon: React.FC<React.SVGProps<SVGSVGElement>> = (props) => (
+    <Icon {...props}>
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+        <polyline points="7 10 12 15 17 10" />
+        <line x1="12" x2="12" y1="15" y2="3" />
+    </Icon>
+);
